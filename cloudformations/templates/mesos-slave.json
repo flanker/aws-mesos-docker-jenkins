@@ -1,0 +1,136 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Mesos Slave (with Docker and Jenkins)",
+  "Parameters": {
+    "VpcId": {
+      "Type": "String",
+      "Description": "VPC ID"
+    },
+    "SubnetId": {
+      "Type": "String",
+      "Description": "Subnet ID"
+    },
+    "AvailabilityZone": {
+      "Type": "String",
+      "Description": "Availability Zone"
+    },
+    "KeyName": {
+      "Type": "String",
+      "Description": "Key Name"
+    },
+    "AmiId": {
+      "Type": "String",
+      "Description": "AMI ID"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Description": "Instance Type"
+    },
+    "ZooKeeperIp": {
+      "Type": "String",
+      "Description": "ZooKeeper Ip"
+    }
+  },
+  "Resources": {
+    "instancesSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for instances (Mesos Slave)",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "udp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "icmp",
+          "FromPort": "-1",
+          "ToPort": "-1",
+          "CidrIp": "0.0.0.0/0"
+        }]
+      }
+    },
+    "launchConfiguration": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "AssociatePublicIpAddress": true,
+        "ImageId": { "Ref": "AmiId" },
+        "InstanceType": { "Ref": "InstanceType" },
+        "InstanceMonitoring": true,
+        "SecurityGroups": [{
+          "Ref": "instancesSecurityGroup"
+        }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -ex\n",
+                "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+                "date\n",
+                "\n",
+                "DISTRO=$(lsb_release -is | tr '[:upper:]' '[:lower:]'); CODENAME=$(lsb_release -cs); echo \"deb http://repos.mesosphere.io/${DISTRO} ${CODENAME} main\" | tee /etc/apt/sources.list.d/mesosphere.list\n",
+                "apt-key adv --keyserver keyserver.ubuntu.com --recv E56151BF\n",
+                "apt-get -y update\n",
+                "apt-get -y install curl python-setuptools python-pip python-dev python-protobuf zookeeperd\n",
+                "apt-get -y install docker.io\n",
+                "apt-get -y install mesos\n",
+                "\n",
+                "useradd jenkins\n",
+                "function start_slave {\n",
+                "  local tag=\\\"${1##*/}[$$]\\\"\n",
+                "  exec 1> >(exec logger -p user.info -t \\\"$tag\\\")\n",
+                "  exec 2> >(exec logger -p user.err  -t \\\"$tag\\\")\n",
+                "  exec /usr/sbin/mesos-slave \\\n",
+                "    --master=zk://", {"Ref": "ZooKeeperIp"}, ":2181/mesos \\\n",
+                "    --log_dir=/var/log/mesos \\\n",
+                "    --no-hostname_lookup \\\n",
+                "    --containerizers=docker,mesos \n",
+                "}\n",
+                "start_slave\n",
+                "\n",
+                "date\n"
+              ]
+            ]
+          }
+        },
+        "KeyName": { "Ref": "KeyName" }
+      }
+    },
+    "autoScalingGroup": {
+      "UpdatePolicy": {
+        "AutoScalingScheduledAction": {
+          "IgnoreUnmodifiedGroupSizeProperties": true
+        },
+        "AutoScalingRollingUpdate": {
+          "SuspendProcesses": ["ScheduledActions"],
+          "WaitOnResourceSignals": true
+        }
+      },
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AvailabilityZones": [{ "Ref": "AvailabilityZone" }],
+        "Cooldown": "120",
+        "DesiredCapacity": "1",
+        "HealthCheckGracePeriod": 600,
+        "HealthCheckType": "EC2",
+        "LaunchConfigurationName": {
+          "Ref": "launchConfiguration"
+        },
+        "MaxSize": "1",
+        "MinSize": "1",
+        "Tags": [{
+          "Key": "Name",
+          "Value": "Mesos Slave",
+          "PropagateAtLaunch": true
+        }],
+        "VPCZoneIdentifier": [{ "Ref": "SubnetId" }]
+      }
+    }
+  }
+}

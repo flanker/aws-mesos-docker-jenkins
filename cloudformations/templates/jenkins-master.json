@@ -1,0 +1,167 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Jenkins Master (with Mesos lib)",
+  "Parameters": {
+    "VpcId": {
+      "Type": "String",
+      "Description": "VPC ID"
+    },
+    "SubnetId": {
+      "Type": "String",
+      "Description": "Subnet ID"
+    },
+    "AvailabilityZone": {
+      "Type": "String",
+      "Description": "Availability Zone"
+    },
+    "KeyName": {
+      "Type": "String",
+      "Description": "Key Name"
+    },
+    "AmiId": {
+      "Type": "String",
+      "Description": "AMI ID"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Description": "Instance Type"
+    }
+  },
+  "Resources": {
+    "instancesSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for instances (Jenkins Master)",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "udp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "icmp",
+          "FromPort": "-1",
+          "ToPort": "-1",
+          "CidrIp": "0.0.0.0/0"
+        }]
+      }
+    },
+    "loadBalancerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for load balancer (Jenkins Master)",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": 80,
+          "ToPort": 80,
+          "CidrIp": "0.0.0.0/0"
+        }]
+      }
+    },
+    "loadBalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "Scheme": "internet-facing",
+        "Subnets": [{ "Ref": "SubnetId" }],
+        "SecurityGroups": [{
+          "Ref": "loadBalancerSecurityGroup"
+        }],
+        "Listeners": [{
+          "Protocol": "HTTP",
+          "LoadBalancerPort": 80,
+          "InstancePort": 8080
+        }],
+        "HealthCheck": {
+          "Target": "HTTP:8080/",
+          "HealthyThreshold": 2,
+          "UnhealthyThreshold": 4,
+          "Interval": 10,
+          "Timeout": 8
+        },
+        "CrossZone": true,
+        "ConnectionDrainingPolicy": {
+          "Enabled": true,
+          "Timeout": 30
+        },
+        "Tags": [{
+          "Key": "Name",
+          "Value": "Jenkins Master"
+        }]
+      }
+    },
+    "launchConfiguration": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "AssociatePublicIpAddress": true,
+        "ImageId": { "Ref": "AmiId" },
+        "InstanceType": { "Ref": "InstanceType" },
+        "InstanceMonitoring": true,
+        "SecurityGroups": [{
+          "Ref": "instancesSecurityGroup"
+        }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -ex\n",
+                "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+                "date\n",
+                "\n",
+                "DISTRO=$(lsb_release -is | tr '[:upper:]' '[:lower:]'); CODENAME=$(lsb_release -cs); echo \"deb http://repos.mesosphere.io/${DISTRO} ${CODENAME} main\" | tee /etc/apt/sources.list.d/mesosphere.list\n",
+                "apt-key adv --keyserver keyserver.ubuntu.com --recv E56151BF\n",
+                "wget -q -O - https://jenkins-ci.org/debian/jenkins-ci.org.key | sudo apt-key add - \n",
+                "sh -c 'echo deb http://pkg.jenkins-ci.org/debian binary/ > /etc/apt/sources.list.d/jenkins.list' \n",
+                "apt-get update \n",
+                "apt-get install -y mesos jenkins \n",
+                "service jenkins start \n",
+                "\n",
+                "date\n"
+              ]
+            ]
+          }
+        },
+        "KeyName": { "Ref": "KeyName" }
+      }
+    },
+    "autoScalingGroup": {
+      "UpdatePolicy": {
+        "AutoScalingScheduledAction": {
+          "IgnoreUnmodifiedGroupSizeProperties": true
+        },
+        "AutoScalingRollingUpdate": {
+          "SuspendProcesses": ["ScheduledActions"],
+          "WaitOnResourceSignals": true
+        }
+      },
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AvailabilityZones": [{ "Ref": "AvailabilityZone" }],
+        "Cooldown": "120",
+        "DesiredCapacity": "1",
+        "HealthCheckGracePeriod": 600,
+        "HealthCheckType": "ELB",
+        "LaunchConfigurationName": {
+          "Ref": "launchConfiguration"
+        },
+        "LoadBalancerNames": [{
+          "Ref": "loadBalancer"
+        }],
+        "MaxSize": "1",
+        "MinSize": "1",
+        "Tags": [{
+          "Key": "Name",
+          "Value": "Jenkins Master",
+          "PropagateAtLaunch": true
+        }],
+        "VPCZoneIdentifier": [{ "Ref": "SubnetId" }]
+      }
+    }
+  }
+}

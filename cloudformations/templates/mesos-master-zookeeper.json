@@ -1,0 +1,184 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Mesos Master with ZooKeeper",
+  "Parameters": {
+    "VpcId": {
+      "Type": "String",
+      "Description": "VPC ID"
+    },
+    "SubnetId": {
+      "Type": "String",
+      "Description": "Subnet ID"
+    },
+    "AvailabilityZone": {
+      "Type": "String",
+      "Description": "Availability Zone"
+    },
+    "KeyName": {
+      "Type": "String",
+      "Description": "Key Name"
+    },
+    "AmiId": {
+      "Type": "String",
+      "Description": "AMI ID"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Description": "Instance Type"
+    }
+  },
+  "Resources": {
+    "instancesSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for instances (Mesos Master with ZooKeeper)",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "udp",
+          "FromPort": "0",
+          "ToPort": "65535",
+          "CidrIp": "0.0.0.0/0"
+        }, {
+          "IpProtocol": "icmp",
+          "FromPort": "-1",
+          "ToPort": "-1",
+          "CidrIp": "0.0.0.0/0"
+        }]
+      }
+    },
+    "loadBalancerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for load balancer (Mesos Master with ZooKeeper)",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": 80,
+          "ToPort": 80,
+          "CidrIp": "0.0.0.0/0"
+        }]
+      }
+    },
+    "loadBalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "Scheme": "internet-facing",
+        "Subnets": [{ "Ref": "SubnetId" }],
+        "SecurityGroups": [{
+          "Ref": "loadBalancerSecurityGroup"
+        }],
+        "Listeners": [{
+          "Protocol": "HTTP",
+          "LoadBalancerPort": 80,
+          "InstancePort": 5050
+        }],
+        "HealthCheck": {
+          "Target": "HTTP:5050/",
+          "HealthyThreshold": 2,
+          "UnhealthyThreshold": 4,
+          "Interval": 10,
+          "Timeout": 8
+        },
+        "CrossZone": true,
+        "ConnectionDrainingPolicy": {
+          "Enabled": true,
+          "Timeout": 30
+        },
+        "Tags": [{
+          "Key": "Name",
+          "Value": "Mesos Master w ZooKeeper"
+        }]
+      }
+    },
+    "launchConfiguration": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "AssociatePublicIpAddress": true,
+        "ImageId": { "Ref": "AmiId" },
+        "InstanceType": { "Ref": "InstanceType" },
+        "InstanceMonitoring": true,
+        "SecurityGroups": [{
+          "Ref": "instancesSecurityGroup"
+        }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -ex\n",
+                "exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n",
+                "date\n",
+                "apt-get update\n",
+                "echo \"apt-get updated\"\n",
+                "apt-get install -y openjdk-7-jre-headless wget\n",
+                "wget -q -O - http://apache.mirrors.pair.com/zookeeper/zookeeper-3.4.6/zookeeper-3.4.6.tar.gz \\\n",
+                "    | tar -xzf - -C /opt \\\n",
+                "    && mv /opt/zookeeper-3.4.6 /opt/zookeeper \\\n",
+                "    && cp /opt/zookeeper/conf/zoo_sample.cfg /opt/zookeeper/conf/zoo.cfg \\\n",
+                "    && mkdir -p /tmp/zookeeper\n",
+                "export JAVA_HOME=/usr/lib/jvm/java-7-openjdk-amd64\n",
+                "# /opt/zookeeper/bin/zkServer.sh start\n",
+                "# echo \"zookeeper started\"\n",
+                "DISTRO=$(lsb_release -is | tr '[:upper:]' '[:lower:]'); CODENAME=$(lsb_release -cs); echo \"deb http://repos.mesosphere.io/${DISTRO} ${CODENAME} main\" | tee /etc/apt/sources.list.d/mesosphere.list\n",
+                "apt-key adv --keyserver keyserver.ubuntu.com --recv E56151BF\n",
+                "apt-get -y update\n",
+                "apt-get -y install curl python-setuptools python-pip python-dev python-protobuf zookeeperd\n",
+                "echo 1 | dd of=/var/lib/zookeeper/myid\n",
+                "apt-get -y install mesos\n",
+                "mkdir -p /etc/mesos-master\n",
+                "# echo in_memory | dd of=/etc/mesos-master/registry\n",
+                "# echo 127.0.0.1 | dd of=/etc/mesos-master/hostname\n",
+                "# echo zk://127.0.0.1:2181/mesos | dd of=/etc/mesos-master/zk\n",
+                "# echo 80 | dd of=/etc/mesos-master/port\n",
+                "# echo /var/log/mesos | dd of=/etc/mesos-master/log_dir\n",
+                "echo 1 | dd of=/etc/mesos-master/quorum\n",
+                "echo /var/lib/mesos | dd of=/etc/mesos-master/work_dir\n",
+                "service mesos-master start\n",
+                "date\n"
+              ]
+            ]
+          }
+        },
+        "KeyName": { "Ref": "KeyName" }
+      }
+    },
+    "autoScalingGroup": {
+      "UpdatePolicy": {
+        "AutoScalingScheduledAction": {
+          "IgnoreUnmodifiedGroupSizeProperties": true
+        },
+        "AutoScalingRollingUpdate": {
+          "SuspendProcesses": ["ScheduledActions"],
+          "WaitOnResourceSignals": true
+        }
+      },
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AvailabilityZones": [{ "Ref": "AvailabilityZone" }],
+        "Cooldown": "120",
+        "DesiredCapacity": "1",
+        "HealthCheckGracePeriod": 600,
+        "HealthCheckType": "ELB",
+        "LaunchConfigurationName": {
+          "Ref": "launchConfiguration"
+        },
+        "LoadBalancerNames": [{
+          "Ref": "loadBalancer"
+        }],
+        "MaxSize": "1",
+        "MinSize": "1",
+        "Tags": [{
+          "Key": "Name",
+          "Value": "Mesos Master w ZooKeeper",
+          "PropagateAtLaunch": true
+        }],
+        "VPCZoneIdentifier": [{ "Ref": "SubnetId" }]
+      }
+    }
+  }
+}
